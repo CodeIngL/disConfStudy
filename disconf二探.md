@@ -229,6 +229,7 @@ tip：**PriorityOrdered**不是必要的。
         * 配置文件的静态扫描 StaticScannerFileMgrImpl
         * 配置项的静态扫描 StaticScannerItemMgrImpl
         * 非注解配置文件的扫描器 StaticScannerNonAnnotationFileMgrImpl
+        
         ---
 
         ### StaticScannerFileMgrImpl配置文件的静态扫描
@@ -314,6 +315,26 @@ tip：**PriorityOrdered**不是必要的。
             * 从文件中得到配置，目前支持properties格式
             * 将配置文件名，注入到仓库中
             * 监控zk下该文件路径
+        这三步发现是比较重要的环节，我们需要重新考虑:前提是在远程开启的情况下
+
+            * 从web端下载相关文件到本地，返回路劲。失败的情况下会使用本地的配置 
+            * 从相关文件中得到配置，目前支持properties格式
+            * 将配置文件名，注入到仓库中
+
+                * 这里如果是xml配置的话，并且文件后缀是.properties要自动加载到spring管理的bean中来
+                    上源码：
+
+                    public static void reload() {
+                        for (ReconfigurableBean bean : reconfigurableBeans) {
+                            try {
+                                bean.reloadConfiguration();
+                            } catch (Exception e) {
+                                logger.warn("while reloading configuration of " + bean, e);
+                            }
+                        }
+                    }
+                最后使用ReloadablePropertiesFactoryBean 来进行doReload。就是设置自身的某个属性：reloadableProperties，
+                然后使用观察发布模式，通知属性的变化。重载
 
 至此firstScan()过程全部完成
 
@@ -361,18 +382,74 @@ tip：**PriorityOrdered**不是必要的。
 
         * ScanDynamicModel scanDynamicModel = analysis4DisconfUpdate(scanModel, registry);
             * 从静态扫描存的结构ScanStaticModel，得到注解DisconfUpdateService
-            * 验证带该注解的类是否实现回调接口**IDisconfUpdate**
+            * 验证带该注解的类是否实现回调接口**IDisconfUpdate*
+            * 使用注册表获取实例接口，**优先从spring中获取，如果没有，则直接新建一个实例**。
             * 处理配置项
                 * 生成一个map<DisconfKey,List>
-                    * DisconfKey 代表了一个配置项，或者配置文件，list则是针对这个的回调接口
+                    * DisconfKey 代表了一个配置项，或者配置文件，list则是针对这个配置的回调接口
             * 处理配置文件
                 * 同上
-            * 生成动态扫描模型类，并将上面的map设置进去 
-            * 更加今天扫描模型类，来设置update pipeline
+            * 生成动态扫描模型类ScanDynamicModel，并将上面的map<DisconfKey,List<IDisconfUpdate>>映射设置进去 
+            * 根据静态的pipeLine设置来，来设置动态扫描模型类pipeline，也是从注册表中获取。
+
         * transformUpdateService(scanDynamicModel.getDisconfUpdateServiceInverseIndexMap());
-            * 写入仓库中
+            * 更新进仓库中，该配置对应名字，必须之前存在（静态扫描）
+
         * transformPipelineService(scanDynamicModel.getDisconfUpdatePipeline());
-            * 同上
-2. disconfCoreMgr.inject2DisconfInstance();
-注入数据至配置实体中，获取数据/注入/Watch。和之前的静态思路一模一样
-特殊的，将仓库里的数据注入到 配置项、配置文件 的实体中
+            * 写入PipeLine仓库中
+
+2. disconfCoreMgr.inject2DisconfInstance(); 
+    注入数据至配置实体中，获取数据/注入/Watch。和之前的静态思路一模一样
+    特殊的，将仓库里的数据注入到 配置项、配置文件的实体中
+
+至此第二次动态扫描也已经完成。从上面看来，都是一个很流程的思维。如何做到及时更新配置文件的呢。重点在维持zk的连接上
+
+---
+
+### 分布式配置
+
+在处理配置文件时，即更新配置文件时，会根据是否开远程disconf来监控路径，也就是：
+
+            if (watchMgr != null) {
+                watchMgr.watchPath(this, disConfCommonModel, fileName, DisConfigTypeEnum.FILE,
+                        GsonUtils.toJson(disconfCenterFile.getKV()));
+                LOGGER.debug("watch ok.");
+            } else {
+                LOGGER.warn("cannot monitor {} because watch mgr is null", fileName);
+            }
+这里将会监控路劲，是如何操作的呢，我们来看：
+
+> |----disconf
+        |----app1_version1_env1
+                |----file
+                        |----confA.properties
+                |----item
+                        |----keyA
+        |----app2_version2_env2
+                |----file
+                        |----conf2.properties
+                |----item
+                        |----key2
+这是一个zk的路径图，摘自官网。
+
+    * 会产生一个永久节点，就是上面二级目录这里，并写入本机的IP，这样代表一个客户端路径
+    * 然后创建三和四级目录，根据是分布式文件还是分布式配置项来看。
+    * 最后根据DisClientComConfig这个前文提到过的，创建5级目录，这个目录就能代表该应用，同时是一个临时的的节点，
+    存储的是disconfCenterFile或者disconfCenterItem序列化对象。
+
+这里提到还是路径的创建。在路径创建完毕之后，会监控路径。路径到4级目录。最后作者以一个函数monitorMaster。不知道意图是什么。
+
+这样当收到zk信息变更时，会收到通知。也就是NodeWatcher，重写的方法。
+
+    * 当收到的事件是数据发生了改变，则会重新调用回调函数callback。最后会跟新配置，并调用注册回调函数列表，
+    最后调用pipeline。作者在这上面写了注解  
+    通用型的配置更新接口。当配置更新 时，用户可以实现此接口，用以来实现回调函数.
+    这里用两种类型的回调函数 
+
+        * IDisconfUpdate        针对某一个配置项，或者配置文件。
+        * IDisconfUpdatePipeline 下面这种针对所用的配置项以及配置文件
+
+至此disconf就完成了。至于xml配置形式。只是在spring的初始化过程中做了手脚，想要直接更新必须要使用回调接口。
+而且作者已经不建议使用xml配置形式
+
+
