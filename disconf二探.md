@@ -25,22 +25,16 @@
 
 回过头来，该类接口的实现类，优先级排到了最高位，也就是会最早被使用后置处理器，另外由于BeanDefinitionRegistryPostProcessor的特殊性
 可以对BeanDefinition处理。我们来看一下这个接口实现（**postProcessBeanDefinitionRegistry**）。  
-tip：**PriorityOrdered**不是必要的。
 
 ---
-### postProcessBeanDefinitionRegistry（BeanDefinitionRegistry)
+
+### postProcessBeanDefinitionRegistry（BeanDefinitionRegistry)解析
 上源码:
 
         // 为了做兼容
         DisconfCenterHostFilesStore.getInstance().addJustHostFileSet(fileList);
 
-        //从scanPackage字符串获得包名（去重），分隔符为“，”。
-        List<String> scanPackList = StringUtil.parseStringToStringList(scanPackage, SCAN_SPLIT_TOKEN);
-        // unique
-        Set<String> hs = new HashSet<String>();
-        hs.addAll(scanPackList);
-        scanPackList.clear();
-        scanPackList.addAll(hs);
+        //从scanPackage字符串获得包名（去重），分隔符为“，”，。
 
         // 进行扫描
         DisconfMgr.getInstance().setApplicationContext(applicationContext);
@@ -49,29 +43,21 @@ tip：**PriorityOrdered**不是必要的。
         // register java bean
         registerAspect(registry);
 
-作者在实现上做了注释。我也添加了注释，应该很清晰。我们来关注我们所需的重点。  
-这里我们首先引入一个类**DisconfMgr**。这个类是应用单例的，
-按着作者所说，这个是disconf 客户端的总入口。
+作者在代码上做了注释。我做了简单的处理。现在来关注重点。  
+这里我们首先介绍该方法所属**DisconfMgr**。
+这个类是应用单例，根据作者所添加注释，这个是**disconf**客户端的总入口。
+接下来关注两个方法入口方法。
 
-**重点之firstScan(packageNameList)**  
+**入口方法之firstScan(packageNameList)**  
+话不多说，直接上源码：
 
-
-
-方法源码：
-
-     /**
-     * 第一次扫描，静态扫描 for annotation config
-     */
+     // 第一次扫描，静态扫描 for annotation config
     protected synchronized void firstScan(List<String> scanPackageList) {
-
-        // 该函数不能调用两次。。。省略
-
-        try {
 
             // 导入配置
             ConfigMgr.init();
 
-            LOGGER.info("******************************* DISCONF START FIRST SCAN *******************************");
+            ......
 
             // registry
             Registry registry = RegistryFactory.getSpringRegistry(applicationContext);
@@ -86,42 +72,53 @@ tip：**PriorityOrdered**不是必要的。
             disconfCoreMgr = DisconfCoreFactory.getDisconfCoreMgr(registry);
             disconfCoreMgr.process();
 
-            //
-            isFirstInit = true;
+            ......
 
-            LOGGER.info("******************************* DISCONF END FIRST SCAN *******************************");
-
-        } catch (Exception e) {
-
-            LOGGER.error(e.toString(), e);
-        }
     }
 
-作者文档描述还是比较详细的。 我们直接看try这部分
+作者文档描述还是比较详细的。 我们直接看贴出来的部分
 
 
 1. ConfigMgr.init()
-    
-    这里做了两部分，一是加载系统配置，二是加载用户配置。来看下源码
-这里作者还提到了一个细节的地方。这里设计到了4个类，其中三个是应用单例。  
-简要的说明设计到4个类
-    
+
+这里主要是两部分
+
+        * 加载系统配置
+        * 加载用户配置
+
+总共涉及到4个类，其中3个是应用单例，1个工具类具体如下： 
+
     * DisClientComConfig   通用配置类 单例
     * DisClientSysConfig   系统配置类 单例
     * DisClientConfig      用户配置类 单例
     * DisInnerConfigHelper 配置校验工具类
 
     ----
+
     下面进行具体的说明。
 
     * DisClientComConfig.getInstance().getInstanceFingerprint()  
         DisClientComConfig类描述些通用的信息（提供了该类的标识:主机+端口(默认0）+UUID），上面返回信息。
+        其中host可以配置通过系统参数：VCAP_APP_HOST。端口也是可配置的: VCAP_APP_HOST。
+
     * DisClientSysConfig.getInstance().loadConfig(null);   
-        这一步会加载disconf_sys.properties(存储在客户端jar中)，然后委托给工具类**DisconfAutowareConfig**注入系统配置单例。
-        这里会使用类加载的URL方式和通俗文件方式，获取配置文件，前者可以避免缓存。优先使用URL，没有则进入普通方式。
-        最后把得到的prop配置对象注入系统配置类（DisClientSysConfig）。。。这个注入就很简单了利用反射和注解。
+        这一步会使用文件名：disconf_sys.properties(存储在客户端jar中)，
+        然后委托给配工具类**DisconfAutowareConfig**做如下两步：
+            
+            * 加载读取文件的配置 
+            这里也涉及到两种方式读取。
+
+                * URL方式
+                    这个使用getResource方法会调用父类加载来加载文件，因为在tomcat中应用类加载器重写规则有点特别，所以我们调用其父类加载器。
+                    然后就是URI的处理了。这里应该是getResourceAsStream()方式来的。
+                * 直接文件方式
+                    直接文件流操作了，十分的简单。
+            * 注入系统配置单例的属性中。
+            最后把得到的prop配置对象注入系统配置类（DisClientSysConfig）。
+            这个注入就很简单了利用反射和注解。将设置DisClentSysyConfig的4个字段，在下文提到。
+
     * DisInnerConfigHelper.verifySysConfig();  
-        对上面prop配置对象注入后，进行一些配置校验，主要有这些(可以修改):
+        对上面prop配置对象注入后，进行一些配置校验，主要有这些(可以修改)，下面上文说到的字段对应，全部必要:
 
         * disconf.conf_server_store_action 仓库 URL  默认/api/config
         * disconf.conf_server_zoo_action  zk URL    默认/api/zoo
@@ -129,33 +126,36 @@ tip：**PriorityOrdered**不是必要的。
         * disconf.local_download_dir  下载文件夹, 远程文件下载后会放在这里  默认./disconf/download
 
     * DisClientConfig.getInstance().loadConfig(null);  
-        同上，这一步是加载用户的配置。配置文件默认是disconf.properties。这里提供了扩张，
-        可以使用命令行-d 进行导入ex：-D  disconf.conf=xxxx
-        后面的步骤是一模一样的了。但是多了一步使用系统参数（优先）的注入，就是某些参数可以不写在配置文件里面。
-        同样和上面一样也有校验。
+        同上文加载系统配置，这里是加载用户的配置。
+        配置文件默认是disconf.properties。这里提供了命令行的可选项（首选项）：
+        使用java命令行-d 进行导入文件ex：-Ddisconf.conf=xxxx
+        后面的步骤是一模一样的了。但是多了一步使用系统参数会决定配置，就是某些参数可以使用-D传递或者进行覆盖。
+
+    * DisInnerConfigHelper.verifyUserConfig(); 
+    同样和上面一样也有校验。
         
-        * disconf.conf_server_host 配置文件服务器 HOST（web管理界面的地址） 
-        * disconf.version 版本  默认值（DEFAULT_VERSION）
+        * disconf.conf_server_host 配置文件服务器 HOST（web端的地址):字段hostList保存
         * disconf.app app名   
+        * disconf.version 版本  默认值（DEFAULT_VERSION）
         * disconf.env 部署环境  默认值（DEFAULT_ENV）
         * 不必要的：  
-            * disconf.enable.remote.conf 是否从云端下载配置 默认false  
+            * disconf.enable.remote.conf 是否从云端下载配置 默认false(分布式配置关键) 
             * disconf.debug 是否开启DEBUG模式: 默认不开启，默认false  
                 * true: 用于线下调试，当ZK断开与client连接后（如果设置断点，这个事件很容易就发生），ZK不会去重新建立连接。  
                 * false: 用于线上，当ZK断开与client连接后，ZK会再次去重新建立连接。
-            * disconf.user_define_download_dir 用户下载文件夹 默认./disconf/download 没有胡创建
-            * disconf.ignore 忽略哪些分布式配置 默认空
+            * disconf.user_define_download_dir 用户下载文件夹 默认./disconf/download 没有则创建
+            * disconf.ignore 忽略哪些分布式配置或者配置文件 默认空：字段ignoreDisconfKeySet保存
             * disconf.conf_server_url_retry_times 获取远程配置 重试次数，默认是3次
             * disconf.conf_server_url_retry_sleep_seconds 获取远程配置 重试时休眠时间，默认是5秒
             * disconf.enable_local_download_dir_in_class_path 让下载文件夹放在 classpath目录  
 
         经过上面一步系统和用户的配置都会被载入完毕。
-
     至此第一步完成。
 
 2. getSpringRegistry（applicationContext）  
     一个SpringRegistry的注册表，装饰了一个简单的注册表**simpleRegistry**
-    目的是为了获得bean也就是，simpleRegistry基本是个软肋，主要还是直接操spring的applicationContext
+    目的是为了获得bean，按类型获得bean。当然如果不是spring管的那么，就会使用simpleRegistry直接new出实例吗，
+    因此simpleRegistry基本是个软肋，主要还是直接操spring的applicationContext
 
 3. ScanFactory.getScanMgr(registry)  
     构造了一个扫描模块ScanMgrImpl，组装了注册表，并添加了几个静态扫描器。
@@ -176,7 +176,7 @@ tip：**PriorityOrdered**不是必要的。
     从构造函数也可以看出来添加了三个上面所说的静态扫描器，针对不同的配置
 
 4. scanMgr.firstScan(scanPackageList)  
-   第一次扫描并入库，作者是这样说明的，这里是我们要考虑的重点。然我们看起函数内部实现。
+   第一次扫描并入库，作者的注释如此的，这里是我们要考虑的重点。然我们看起函数内部实现。
 
         扫描并存储(静态)
         public void firstScan(List<String> packageNameList) throws Exception {
@@ -203,14 +203,14 @@ tip：**PriorityOrdered**不是必要的。
         * 利用放射得到基本信息，设置ScanStaticModel对象中，主要是以下内容:
 
             * 设置reflections 对象，
-            * 设置disconfFileClassSet 存储带DisconfFile注解的类信息
-            * 设置disconfFileItemMethodSet 存储带DisconfFileItem注解的方法信息
-            * 设置disconfItemMethodSet 存储带DisconfItem注解的方法信息
-            * 设置disconfActiveBackupServiceClassSet 存储带DisconfActiveBackupService注解的类信息
-            * 设置disconfUpdateService 存储带DisconfUpdateService注解的类信息
-            * 设置idisconfUpdatePipeline 存储实现IDisconfUpdatePipeline类
+            * 设置disconfFileClassSet 存储带DisconfFile注解的类信息：分布式配置文件
+            * 设置disconfFileItemMethodSet 存储带DisconfFileItem注解的方法信息：分布式配置文件中的配置项
+            * 设置disconfItemMethodSet 存储带DisconfItem注解的方法信息：分布式配置项
+            * 设置disconfActiveBackupServiceClassSet 存储带DisconfActiveBackupService注解的类信息：主备切换的时候受影响的配置
+            * 设置disconfUpdateService 存储带DisconfUpdateService注解的类信息：配置更新时候，要配置的数据
+            * 设置idisconfUpdatePipeline 存储实现IDisconfUpdatePipeline类：配置跟新的时候，通用的回调接口
         
-        * 接着将上面的基本信息进行整理 
+        * 接着将上面的基本信息进行整理：目的将配置文件，以及其中配置的内容项对应起来
 
             *　构造一个Map<disconfFileClass,disconfFileItemMethod>的映射。
                 * DisconfFile指的是分布式配置文件。
@@ -240,7 +240,7 @@ tip：**PriorityOrdered**不是必要的。
             }
 
         很简短，我们看一下，里面也很简单，就是从上面所说的映射设置disconfFileItemMap 取得每一个键值对组装成**DisconfCenterFile**类
-        **DisconfCenterFile**是分布式配置文件的内存对象表示。然后将该对象和文件名射进单例配置仓库中DisconfCenterStore
+        **DisconfCenterFile**是分布式配置文件的内存对象表示。然后将该对象和文件名组成映射放入单例配置仓库中DisconfCenterStore
 
          ### StaticScannerItemMgrImpl配置项的静态扫描
            public void scanData2Store(ScanStaticModel scanModel) {
@@ -250,7 +250,7 @@ tip：**PriorityOrdered**不是必要的。
             }
 
         同上，把ScanStaticModel中关于配置项的disconfItemMethodSet中取得每一个键值对组装成**DisconfCenterItem**类
-        **DisconfCenterItem**是分布式配置项的内存对象表示。然后同上射进配置仓库中DisconfCenterStore
+        **DisconfCenterItem**是分布式配置项的内存对象表示。然后同上存储在配置仓库中
 
         ### StaticScannerNonAnnotationFileMgrImpl非注解配置文件的静态扫描
             public void scanData2Store(ScanStaticModel scanModel) {
